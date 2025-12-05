@@ -23,6 +23,7 @@ This project trains an AI agent to play pickleball using Stable-Baselines3 (A2C 
 
 ### Documentation
 - **`HOW_TO_TRANSFER_TRAINING.md`** - Instructions for transferring training between computers
+- **`COLLABORATIVE_TRAINING.md`** - Guide for multiple friends taking turns training
 
 ## 🚀 Quick Start
 
@@ -90,10 +91,18 @@ python CompetitionScripts/Competition.py
 
 ## 🔄 Transferring Training
 
+### Single Transfer
 See `HOW_TO_TRANSFER_TRAINING.md` for instructions on:
 - Uploading checkpoints to GitHub
 - Resuming training on another computer
 - Continuing training after reaching target steps
+
+### Collaborative Training (Multiple Friends)
+See `COLLABORATIVE_TRAINING.md` for instructions on:
+- Taking turns training the model
+- Sharing progress via GitHub
+- Resuming from another friend's checkpoint
+- Best practices for team training
 
 ## 📝 Notes
 
