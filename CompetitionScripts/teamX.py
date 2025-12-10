@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from collections import deque
 import cv2
@@ -14,10 +15,15 @@ class TeamX:
         Args:
             frame_stack: Number of frames to stack (should match training, default 64)
             img_size: Target image size (H, W) - should match training (168, 84)
+            side: "right" (default, matches training) or "left" (mirror obs/actions)
         """
         self.frame_stack = frame_stack
         self.img_size = img_size
         self.frames = deque(maxlen=frame_stack)
+        # Side selection: default right (matches training); set AGENT_SIDE=left to flip
+        self.side = os.getenv("AGENT_SIDE", "right").lower()
+        if self.side not in ("right", "left"):
+            self.side = "right"
 
         # Load your checkpoint for policy network
         # TODO: Update this path to point to your trained model file
@@ -28,7 +34,20 @@ class TeamX:
         self.model.policy.to(device)
         self.model.set_env(None)  # Set to None for inference only
     
-    def _preprocess(self, observation):
+    def _mirror_obs(self, obs: np.ndarray) -> np.ndarray:
+        """Horizontally flip (C,H,W) observation."""
+        return obs[..., ::-1]
+
+    def _mirror_action(self, action: np.ndarray) -> np.ndarray:
+        """Swap left/right in action component index 1 (0:none,1:right,2:left)."""
+        mirrored = action.copy()
+        if mirrored[1] == 1:
+            mirrored[1] = 2
+        elif mirrored[1] == 2:
+            mirrored[1] = 1
+        return mirrored
+
+    def _preprocess(self, observation, mirror: bool):
         """
         Preprocess observation to match training format.
         Observation comes in as (C, H, W) from Unity.
@@ -45,7 +64,8 @@ class TeamX:
         
         # Normalize to [0, 1] to match training
         obs = obs.astype(np.float32) / 255.0
-        
+        if mirror:
+            obs = self._mirror_obs(obs)
         return obs
     
     # Your policy takes only visual representation as input, 
@@ -55,7 +75,8 @@ class TeamX:
         # Implement your solution here
 
         # Preprocess observation
-        processed_obs = self._preprocess(observation)
+        mirror_obs = (self.side == "left")  # if on left, mirror input to look like right-side view
+        processed_obs = self._preprocess(observation, mirror=mirror_obs)
         
         # Add to frame stack
         self.frames.append(processed_obs)
@@ -74,6 +95,10 @@ class TeamX:
         obs_batch = np.expand_dims(stacked_obs, axis=0)  # (1, stack, H, W)
         action, _states = self.model.predict(obs_batch, deterministic=True)
         action = action[0].astype(np.int32)  # Remove batch dimension
+
+        # If playing left side, un-mirror horizontal action so environment receives left-oriented control
+        if self.side == "left":
+            action = self._mirror_action(action)
 
         return action
 
