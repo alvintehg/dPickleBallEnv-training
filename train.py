@@ -18,11 +18,14 @@ TOTAL_TIMESTEPS = 1_000_000  # Total timesteps to train (or continue training)
 # Note: If model already trained 1M steps, increase this to continue (e.g., 2_000_000 for 2M total)
 CHECKPOINT_FREQ = 10_000  # Save checkpoint every N steps (lower = more frequent saves, safer but uses more disk space)
 
+# —— STAGE 1: ACTION BRANCH PROBE ——
+RUN_ACTION_PROBE = True  # Set to True to run branch mapping probe at startup
+
 # ⚠️ IMPORTANT: Update this path to point to your Unity build location!
 # You can also set the UNITY_BUILD_PATH environment variable instead
 UNITY_BUILD_PATH = os.getenv(
     "UNITY_BUILD_PATH",
-    r'/Users/quanpin/Downloads/dPickleball BuildFiles/Training/Mac/Mac.app'  # DEFAULT - UPDATE THIS!
+    r'/Users/Justin/Desktop/dpickleball/dPickleball BuildFiles/Training/Windows/dp.exe'  # DEFAULT - UPDATE THIS!
 )
 
 # Create model directory if it doesn't exist
@@ -79,8 +82,10 @@ except Exception as e:
     print("=" * 60)
     raise
 
-print("Wrapping environment with reward shaping...")
-env = SharedObsUnityGymWrapper(unity_env, frame_stack=64, img_size=(168, 84), grayscale=True)
+print("Wrapping environment with serve training wrapper...")
+print("🎯 SERVE TRAINING MODE ENABLED - Using 3x reward multiplier for serve behavior")
+print("📊 STAGE 6: Using reduced frame_stack=4 for faster learning")
+env = SharedObsUnityGymWrapper(unity_env, frame_stack=4, img_size=(168, 84), grayscale=True, serve_training_mode=True, run_probe=RUN_ACTION_PROBE)
 
 print("Creating A2C model...")
 policy_kwargs = dict(
@@ -110,7 +115,66 @@ checkpoint_callback = CheckpointCallback(
 )
 
 # --- LOAD EXISTING MODEL OR CREATE NEW ONE ---
+# Check if we can safely load the existing model
+can_load_model = False
+print(f"\nChecking for existing model at: {LAST_MODEL_PATH}")
 if os.path.isfile(LAST_MODEL_PATH):
+    print(f"✓ Model file found: {LAST_MODEL_PATH}")
+    try:
+        # Load model data to check observation space compatibility
+        import zipfile
+        import json
+        print("  Checking observation space compatibility...")
+        with zipfile.ZipFile(LAST_MODEL_PATH, 'r') as zip_file:
+            with zip_file.open('data') as data_file:
+                saved_data = json.loads(data_file.read().decode('utf-8'))
+                saved_obs_space = saved_data.get('observation_space', {})
+
+                # Compare observation space shapes
+                if 'shape' in saved_obs_space:
+                    saved_shape = tuple(saved_obs_space['shape'])
+                    current_shape = env.observation_space.shape
+
+                    if saved_shape == current_shape:
+                        can_load_model = True
+                        print(f"  ✓ Observation space matches: {current_shape}")
+                    else:
+                        print(f"  ⚠️ Observation space mismatch!")
+                        print(f"    Saved model:   {saved_shape}")
+                        print(f"    Current env:   {current_shape}")
+                        print(f"    → Cannot load model (likely due to frame_stack change)")
+                        print(f"    → Will create NEW model instead")
+                        # Backup old model
+                        backup_path = LAST_MODEL_PATH.replace('.zip', '_backup_old_framestack.zip')
+                        if not os.path.exists(backup_path):
+                            import shutil
+                            shutil.copy(LAST_MODEL_PATH, backup_path)
+                            print(f"    → Backed up old model to: {backup_path}")
+                else:
+                    print(f"  ⚠️ No observation space shape found in saved model")
+                    print(f"    → Will try to load anyway (older model format)")
+                    can_load_model = True  # Try to load even if shape not found
+    except Exception as e:
+        print(f"  ⚠️ Could not check model compatibility: {type(e).__name__}: {e}")
+        print(f"    → Will try to load anyway")
+        can_load_model = True  # Try to load even if compatibility check fails
+else:
+    print(f"✗ No model file found at: {LAST_MODEL_PATH}")
+    # Try to find the latest checkpoint as fallback
+    checkpoint_files = [f for f in os.listdir(MODEL_DIR) if f.startswith('checkpoint_') and f.endswith('.zip')]
+    if checkpoint_files:
+        # Sort by modification time (most recent first)
+        checkpoint_files.sort(key=lambda f: os.path.getmtime(os.path.join(MODEL_DIR, f)), reverse=True)
+        latest_checkpoint = os.path.join(MODEL_DIR, checkpoint_files[0])
+        print(f"  → Found checkpoint: {checkpoint_files[0]}")
+        print(f"  → Will try to load from checkpoint instead")
+        LAST_MODEL_PATH = latest_checkpoint  # Override to use checkpoint
+        can_load_model = True  # Try to load it
+    else:
+        print(f"  → No checkpoints found either")
+        print(f"  → Will create NEW model")
+
+if can_load_model:
     print(f"Loading existing model from {LAST_MODEL_PATH}")
     print("Resuming training...")
     # Don't specify policy_kwargs when loading - let it use stored kwargs
@@ -134,13 +198,18 @@ else:
         learning_rate=0.0007,
         n_steps=5,
         gamma=0.99,
+        ent_coef=0.01,  # Entropy coefficient - encourages exploration, prevents policy collapse
         tensorboard_log="./tensorboard_logs/"
     )
     reset_timesteps = True  # Reset timestep counter for new model
 
+print("\n" + "="*60)
 print("Starting training...")
-print("Your agent (right side) will play against the pretrained opponent (left side)")
+print("="*60)
+print("Your agent (RIGHT paddle - Player 2) will play against random opponent (LEFT)")
 print(f"Training for {TOTAL_TIMESTEPS:,} timesteps...")
+print("Watch the terminal for detailed serve/receive logs!")
+print("="*60 + "\n")
 
 try:
     model.learn(
@@ -174,7 +243,30 @@ except KeyboardInterrupt:
 except Exception as e:
     print(f"\nTraining error occurred: {e}")
     print(f"Error type: {type(e).__name__}")
-    
+
+    # Check if this is a Unity communicator crash
+    if "UnityCommunicatorStoppedException" in str(type(e).__name__) or "Communicator has exited" in str(e):
+        print("\n" + "="*60)
+        print("⚠️ UNITY COMMUNICATOR CRASHED")
+        print("="*60)
+        print("Unity build disconnected during training. This can happen due to:")
+        print("  1. Unity build crashed (out of memory, internal error)")
+        print("  2. Invalid actions sent to Unity (now validated, shouldn't happen)")
+        print("  3. ML-Agents version mismatch between Python and Unity build")
+        print("\nTo diagnose the root cause, check Unity's log file:")
+        import os as os_module
+        username = os_module.environ.get('USERNAME', os_module.environ.get('USER', 'unknown'))
+        unity_log_paths = [
+            f"C:\\Users\\{username}\\AppData\\LocalLow\\DefaultCompany\\dPickleball\\Player.log",
+            f"C:\\Users\\{username}\\AppData\\LocalLow\\*\\*\\Player.log",
+            "./Player.log"  # Sometimes in build directory
+        ]
+        print("\nPossible Unity log locations:")
+        for log_path in unity_log_paths:
+            print(f"  - {log_path}")
+        print("\nThe log file will show the exact error that caused Unity to crash.")
+        print("="*60 + "\n")
+
     # Try to save progress if possible
     try:
         print("Attempting to save current progress...")
@@ -186,7 +278,7 @@ except Exception as e:
     except Exception as save_error:
         print(f"Could not save progress: {save_error}")
         print("Check checkpoint files in ./model/ directory")
-    
+
     # Re-raise the error so user knows what happened
     raise
 
